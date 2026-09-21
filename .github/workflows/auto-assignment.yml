@@ -13,6 +13,11 @@ on:
         required: false
         type: string
         default: ''
+      pr_reviewers:
+        description: 'Comma-separated list of GitHub usernames to request reviews from on PRs'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   issues: write
@@ -27,36 +32,63 @@ jobs:
         env:
           CONFIG_ISSUE_ASSIGNEES: '${{ inputs.issue_assignees }}'
           CONFIG_PR_ASSIGNEES: '${{ inputs.pr_assignees }}'
+          CONFIG_PR_REVIEWERS: '${{ inputs.pr_reviewers }}'
         with:
           github-token: '${{ secrets.GITHUB_TOKEN }}'
           script: |
             let issueNumber;
             let assigneesList = [];
+            let reviewersList = [];
 
             const isIssue = Boolean(context.payload.issue && !context.payload.pull_request);
+            const isPr = Boolean(context.payload.pull_request || context.payload.number);
+
             if (isIssue) {
               const raw = process.env.CONFIG_ISSUE_ASSIGNEES || '';
               assigneesList = raw.split(',').map(s => s.trim()).filter(Boolean);
               issueNumber = context.payload.issue.number;
-            } else if (context.payload.pull_request || context.payload.number) {
-              const raw = process.env.CONFIG_PR_ASSIGNEES || '';
-              assigneesList = raw.split(',').map(s => s.trim()).filter(Boolean);
-              issueNumber = context.payload.pull_request ? context.payload.pull_request.number : context.payload.number;
+            } else if (isPr) {
+              const rawAssignees = process.env.CONFIG_PR_ASSIGNEES || '';
+              assigneesList = rawAssignees.split(',').map(s => s.trim()).filter(Boolean);
+
+              const rawReviewers = process.env.CONFIG_PR_REVIEWERS || '';
+              const prAuthor = (context.payload.pull_request?.user?.login || '').toLowerCase();
+              reviewersList = rawReviewers
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean)
+                .filter(u => u.toLowerCase() !== prAuthor);
+
+              issueNumber = context.payload.pull_request
+                ? context.payload.pull_request.number
+                : context.payload.number;
             }
 
-            core.info(`Assignee list for target #${issueNumber}: ${assigneesList.join(', ')}`);
-            if (!assigneesList.length) {
-              core.info('No assignees configured for this event type.');
+            if (!assigneesList.length && !reviewersList.length) {
+              core.info('No assignees or reviewers configured for this event type.');
               return;
             }
 
-            const selection = issueNumber % assigneesList.length;
-            const chosenAssignee = assigneesList[selection];
+            if (assigneesList.length > 0) {
+              core.info(`Assignee list for target #${issueNumber}: ${assigneesList.join(', ')}`);
+              const selection = issueNumber % assigneesList.length;
+              const chosenAssignee = assigneesList[selection];
 
-            core.info(`Assigning #${issueNumber} to ${chosenAssignee}`);
-            await github.rest.issues.addAssignees({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issueNumber,
-              assignees: [chosenAssignee],
-            });
+              core.info(`Assigning #${issueNumber} to ${chosenAssignee}`);
+              await github.rest.issues.addAssignees({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                assignees: [chosenAssignee],
+              });
+            }
+
+            if (reviewersList.length > 0) {
+              core.info(`Requesting reviews for PR #${issueNumber} from: ${reviewersList.join(', ')}`);
+              await github.rest.pulls.requestReviewers({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: issueNumber,
+                reviewers: reviewersList,
+              });
+            }
