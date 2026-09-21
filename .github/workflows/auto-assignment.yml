@@ -20,6 +20,7 @@ on:
         default: ''
 
 permissions:
+  contents: read
   issues: write
   pull-requests: write
 
@@ -27,6 +28,13 @@ jobs:
   auto_assign:
     runs-on: ubuntu-latest
     steps:
+      - name: 'Check out shared workflows repo'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 'keras-team/shared-workflows'
+          persist-credentials: false
+          path: '.shared-workflows'
+
       - name: 'Auto-assign on rotation'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -36,59 +44,5 @@ jobs:
         with:
           github-token: '${{ secrets.GITHUB_TOKEN }}'
           script: |
-            let issueNumber;
-            let assigneesList = [];
-            let reviewersList = [];
-
-            const isIssue = Boolean(context.payload.issue && !context.payload.pull_request);
-            const isPr = Boolean(context.payload.pull_request || context.payload.number);
-
-            if (isIssue) {
-              const raw = process.env.CONFIG_ISSUE_ASSIGNEES || '';
-              assigneesList = raw.split(',').map(s => s.trim()).filter(Boolean);
-              issueNumber = context.payload.issue.number;
-            } else if (isPr) {
-              const rawAssignees = process.env.CONFIG_PR_ASSIGNEES || '';
-              assigneesList = rawAssignees.split(',').map(s => s.trim()).filter(Boolean);
-
-              const rawReviewers = process.env.CONFIG_PR_REVIEWERS || '';
-              const prAuthor = (context.payload.pull_request?.user?.login || '').toLowerCase();
-              reviewersList = rawReviewers
-                .split(',')
-                .map(s => s.trim())
-                .filter(Boolean)
-                .filter(u => u.toLowerCase() !== prAuthor);
-
-              issueNumber = context.payload.pull_request
-                ? context.payload.pull_request.number
-                : context.payload.number;
-            }
-
-            if (!assigneesList.length && !reviewersList.length) {
-              core.info('No assignees or reviewers configured for this event type.');
-              return;
-            }
-
-            if (assigneesList.length > 0) {
-              core.info(`Assignee list for target #${issueNumber}: ${assigneesList.join(', ')}`);
-              const selection = issueNumber % assigneesList.length;
-              const chosenAssignee = assigneesList[selection];
-
-              core.info(`Assigning #${issueNumber} to ${chosenAssignee}`);
-              await github.rest.issues.addAssignees({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issueNumber,
-                assignees: [chosenAssignee],
-              });
-            }
-
-            if (reviewersList.length > 0) {
-              core.info(`Requesting reviews for PR #${issueNumber} from: ${reviewersList.join(', ')}`);
-              await github.rest.pulls.requestReviewers({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: issueNumber,
-                reviewers: reviewersList,
-              });
-            }
+            const autoAssign = require('./.shared-workflows/scripts/auto-assignment.js');
+            await autoAssign({ github, context, core });
