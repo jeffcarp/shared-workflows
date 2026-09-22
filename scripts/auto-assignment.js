@@ -29,8 +29,12 @@ module.exports = async function autoAssign({ github, context, core }) {
   let assigneesList = [];
   let reviewersList = [];
 
-  const isIssue = Boolean(context.payload.issue && !context.payload.pull_request);
-  const isPr = Boolean(context.payload.pull_request || context.payload.number);
+  const isIssue = Boolean(
+    context.payload.issue &&
+      !context.payload.issue.pull_request &&
+      !context.payload.pull_request
+  );
+  const isPr = Boolean(context.payload.pull_request);
 
   if (isIssue) {
     const raw = process.env.CONFIG_ISSUE_ASSIGNEES || '';
@@ -41,20 +45,24 @@ module.exports = async function autoAssign({ github, context, core }) {
     assigneesList = rawAssignees.split(',').map(s => s.trim()).filter(Boolean);
 
     const rawReviewers = process.env.CONFIG_PR_REVIEWERS || '';
-    const prAuthor = (context.payload.pull_request?.user?.login || '').toLowerCase();
+    const prAuthor = (context.payload.pull_request.user?.login || '').toLowerCase();
     reviewersList = rawReviewers
       .split(',')
       .map(s => s.trim())
       .filter(Boolean)
-      .filter(u => u.toLowerCase() !== prAuthor);
+      .filter(u => {
+        if (u.toLowerCase() === prAuthor) {
+          core.info(`Skipping PR author ${u} from review requests.`);
+          return false;
+        }
+        return true;
+      });
 
-    issueNumber = context.payload.pull_request
-      ? context.payload.pull_request.number
-      : context.payload.number;
+    issueNumber = context.payload.pull_request.number;
   }
 
   if (!assigneesList.length && !reviewersList.length) {
-    core.info('No assignees or reviewers configured for this event type.');
+    core.info('No assignees or reviewers to apply for this event.');
     return;
   }
 
