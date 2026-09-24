@@ -19,28 +19,35 @@
 /**
  * Enforce that external PRs link an approved issue assigned to the author.
  *
- * - On `opened`, the PR is converted to a draft and an "Approved issue link"
- *   section is added to the description if it is missing.
- * - On every run, the description is scanned for issue references
- *   (`#123`, `owner/repo#123` or a full issue URL). The PR passes when at
- *   least one referenced issue exists in this repo and has the PR author as
- *   an assignee.
- * - When the check passes, a draft PR is marked "Ready for review". When it
- *   fails and the PR is not a draft, it is converted to a draft. A single
- *   sticky comment is kept up to date with the result.
+ * - On `opened`, an "Approved issue link" section is added to the description
+ *   if it is missing.
+ * - On every run, HTML comments are stripped and the description is scanned for
+ *   issue references (`#xxx`, `owner/repo#xxx` or a full issue URL). The PR
+ *   passes when at least one referenced issue exists in this repo and has the
+ *   PR author as an assignee.
+ * - When the check fails and the PR is not a draft, the PR is converted to a
+ *   draft. Draft PRs are never automatically converted out of draft; the author
+ *   can mark the PR "Ready for review" themselves once ready.
+ * - A single sticky comment is kept up to date with the result.
  *
  * Maintainers, collaborators and bots are skipped by the workflow `if:`.
  */
 
+const POLICY_DOC_URL =
+  "https://github.com/keras-team/shared-workflows/blob/main/docs/pr_policy.md";
 const SECTION_HEADING = "## Approved issue link";
 const SECTION_TEMPLATE = `${SECTION_HEADING}
-<!--- Link the approved issue that is assigned to you, e.g. "Fixes #123".
+<!--- Link the approved issue that is assigned to you, e.g. "Fixes #xxx".
       An issue must be assigned to you and linked here before this PR can be
-      marked "Ready for review". -->
+      marked "Ready for review". See ${POLICY_DOC_URL} -->
 
 `;
 const COMMENT_MARKER = "<!-- pr-approved-issue-check -->";
 const BYPASS_ASSOCIATIONS = ["OWNER", "MEMBER", "COLLABORATOR"];
+// Historical RFC announcement issue in keras-team/keras that was linked in PR templates.
+const IGNORED_REPO_ISSUES = {
+  "keras-team/keras": new Set([23601]),
+};
 
 module.exports = async function prApprovedIssue({ github, context, core }) {
   const pr = context.payload.pull_request;
@@ -54,7 +61,11 @@ module.exports = async function prApprovedIssue({ github, context, core }) {
   const author = pr.user.login;
 
   // Defence in depth: the workflow `if:` already filters these out.
-  if (pr.user.type === "Bot" || BYPASS_ASSOCIATIONS.includes(pr.author_association)) {
+  if (
+    pr.user.type === "Bot" ||
+    author.toLowerCase().endsWith("[bot]") ||
+    BYPASS_ASSOCIATIONS.includes(pr.author_association)
+  ) {
     core.info(`Skipping #${pr.number}: ${author} is ${pr.author_association}.`);
     return;
   }
@@ -62,16 +73,11 @@ module.exports = async function prApprovedIssue({ github, context, core }) {
   let body = pr.body || "";
   let isDraft = pr.draft;
 
-  // 1. On open: make sure the description has the section and start as draft.
-  if (action === "opened") {
-    if (!body.includes(SECTION_HEADING)) {
-      body = SECTION_TEMPLATE + body;
-      await github.rest.pulls.update({ owner, repo, pull_number: pr.number, body });
-      core.info(`Added "${SECTION_HEADING}" section to #${pr.number}.`);
-    }
-    if (!isDraft) {
-      isDraft = await convertToDraft(github, core, pr);
-    }
+  // 1. On open: ensure the description has the "Approved issue link" section.
+  if (action === "opened" && !body.includes(SECTION_HEADING)) {
+    body = SECTION_TEMPLATE + body;
+    await github.rest.pulls.update({ owner, repo, pull_number: pr.number, body });
+    core.info(`Added "${SECTION_HEADING}" section to #${pr.number}.`);
   }
 
   // 2. Find issues referenced in the description that are assigned to the author.
@@ -90,10 +96,9 @@ module.exports = async function prApprovedIssue({ github, context, core }) {
   }
   const passed = assigned.length > 0;
 
-  // 3. Flip the draft state to match the result.
-  if (passed && isDraft) {
-    isDraft = await markReadyForReview(github, core, pr);
-  } else if (!passed && !isDraft) {
+  // 3. Convert to draft if the check failed and the PR is not already a draft.
+  // Never automatically mark a draft PR as ready for review.
+  if (!passed && !isDraft) {
     isDraft = await convertToDraft(github, core, pr);
   }
 
@@ -103,18 +108,17 @@ module.exports = async function prApprovedIssue({ github, context, core }) {
         `✅ Approved issue check passed: ${assigned.map((n) => `#${n}`).join(", ")} ` +
           `is assigned to @${author}.`,
         isDraft
-          ? "Could not mark this PR as ready automatically; please mark it **Ready for review**."
+          ? "You can mark this PR **Ready for review** when it is ready."
           : "This PR is **Ready for review**.",
       ]
     : [
         `❌ Approved issue check failed. This PR ${isDraft ? "stays" : "must stay"} in **draft** until ` +
           "it links an approved issue that is assigned to you.",
         "",
-        "To fix this:",
+        `See the [Keras Pull Request Policy](${POLICY_DOC_URL}). To fix this:`,
         "1. Find or open an issue for this change and ask a maintainer to approve it and assign it to you.",
-        `2. Link it under the "${SECTION_HEADING.replace("## ", "")}" section of this PR's description, e.g. \`Fixes #123\`.`,
-        "",
-        "The PR will be marked **Ready for review** automatically once the check passes.",
+        `2. Link it under the "${SECTION_HEADING.replace("## ", "")}" section of this PR's description, e.g. \`Fixes #xxx\`.`,
+        "3. Once this check passes, mark the PR **Ready for review** when it is ready.",
         "",
         notAssigned.length
           ? `Referenced issue(s) not assigned to @${author}: ${notAssigned.map((n) => `#${n}`).join(", ")}.`
@@ -127,8 +131,13 @@ module.exports = async function prApprovedIssue({ github, context, core }) {
   }
 };
 
-/** Collect issue numbers referenced in `body` that belong to this repo. */
+/** Collect issue numbers referenced in `body` (excluding HTML comments) that belong to this repo. */
 function findIssueNumbers(body, owner, repo) {
+  // Strip HTML comments so placeholders like <!-- Fixes #123 --> are never matched.
+  const uncommented = body.replace(/<!--[\s\S]*?-->/g, "");
+  const repoKey = `${owner}/${repo}`.toLowerCase();
+  const ignored = IGNORED_REPO_ISSUES[repoKey] || new Set();
+
   const escaped = `${owner}/${repo}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const patterns = [
     new RegExp(`https?://github\\.com/${escaped}/issues/(\\d+)`, "gi"),
@@ -138,8 +147,11 @@ function findIssueNumbers(body, owner, repo) {
   ];
   const numbers = new Set();
   for (const pattern of patterns) {
-    for (const match of body.matchAll(pattern)) {
-      numbers.add(Number(match[1]));
+    for (const match of uncommented.matchAll(pattern)) {
+      const num = Number(match[1]);
+      if (!ignored.has(num)) {
+        numbers.add(num);
+      }
     }
   }
   return [...numbers];
@@ -160,24 +172,6 @@ async function convertToDraft(github, core, pr) {
   } catch (err) {
     warnDraftToggleFailed(core, `convert #${pr.number} to draft`, err);
     return pr.draft;
-  }
-}
-
-async function markReadyForReview(github, core, pr) {
-  try {
-    await github.graphql(
-      `mutation($id: ID!) {
-        markPullRequestReadyForReview(input: {pullRequestId: $id}) {
-          pullRequest { isDraft }
-        }
-      }`,
-      { id: pr.node_id }
-    );
-    core.info(`Marked #${pr.number} as ready for review.`);
-    return false;
-  } catch (err) {
-    warnDraftToggleFailed(core, `mark #${pr.number} as ready for review`, err);
-    return true;
   }
 }
 

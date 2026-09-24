@@ -22,6 +22,8 @@ const prApprovedIssue = require('./pr-approved-issue.js');
 
 describe('prApprovedIssue', () => {
   function createHarness({
+    owner = 'keras-team',
+    repo = 'keras-hub',
     action = 'opened',
     pr = null,
     issuesByNumber = {},
@@ -32,6 +34,7 @@ describe('prApprovedIssue', () => {
     const warningMessages = [];
     let failedMessage = null;
     const updatedPrs = [];
+    const fetchedIssues = [];
     const graphqlCalls = [];
     const createdComments = [];
     const updatedComments = [];
@@ -53,6 +56,7 @@ describe('prApprovedIssue', () => {
         },
         issues: {
           get: async ({ issue_number }) => {
+            fetchedIssues.push(issue_number);
             if (!(issue_number in issuesByNumber)) {
               throw new Error('Not Found');
             }
@@ -81,7 +85,7 @@ describe('prApprovedIssue', () => {
     };
 
     const context = {
-      repo: { owner: 'keras-team', repo: 'keras-hub' },
+      repo: { owner, repo },
       payload: {
         action,
         pull_request: pr,
@@ -94,6 +98,7 @@ describe('prApprovedIssue', () => {
       getWarningMessages: () => warningMessages,
       getFailedMessage: () => failedMessage,
       getUpdatedPrs: () => updatedPrs,
+      getFetchedIssues: () => fetchedIssues,
       getGraphqlCalls: () => graphqlCalls,
       getCreatedComments: () => createdComments,
       getUpdatedComments: () => updatedComments,
@@ -108,11 +113,12 @@ describe('prApprovedIssue', () => {
   });
 
   it('skips bots and bypassed author associations (OWNER, MEMBER, COLLABORATOR)', async () => {
-    for (const [type, association] of [
-      ['Bot', 'NONE'],
-      ['User', 'OWNER'],
-      ['User', 'MEMBER'],
-      ['User', 'COLLABORATOR'],
+    for (const [login, type, association] of [
+      ['bot-account', 'Bot', 'NONE'],
+      ['dependabot[bot]', 'User', 'NONE'],
+      ['owner-user', 'User', 'OWNER'],
+      ['member-user', 'User', 'MEMBER'],
+      ['collab-user', 'User', 'COLLABORATOR'],
     ]) {
       const harness = createHarness({
         pr: {
@@ -120,7 +126,7 @@ describe('prApprovedIssue', () => {
           node_id: 'PR_10',
           draft: false,
           author_association: association,
-          user: { login: 'maintainer-or-bot', type },
+          user: { login, type },
           body: 'No issue link needed',
         },
       });
@@ -131,7 +137,7 @@ describe('prApprovedIssue', () => {
     }
   });
 
-  it('on opened: prepends Approved issue link section, converts non-draft PR to draft, posts comment, and fails when no issue is linked', async () => {
+  it('on opened without linked issue: prepends section, converts non-draft PR to draft, posts comment, and fails', async () => {
     const harness = createHarness({
       action: 'opened',
       pr: {
@@ -142,6 +148,10 @@ describe('prApprovedIssue', () => {
         user: { login: 'external-dev', type: 'User' },
         body: 'Here is my new feature.',
       },
+      issuesByNumber: {
+        // Even if #123 exists in the repo, the template comment must not trigger a fetch for #123.
+        123: { number: 123, assignees: [{ login: 'someone-else' }] },
+      },
     });
 
     await harness.run();
@@ -151,44 +161,51 @@ describe('prApprovedIssue', () => {
     assert.ok(harness.getUpdatedPrs()[0].body.startsWith('## Approved issue link\n'));
     assert.ok(harness.getUpdatedPrs()[0].body.endsWith('Here is my new feature.'));
 
-    // 2. Converted to draft once on opened (and not called a second time).
+    // 2. No issue numbers fetched from HTML comments.
+    assert.deepStrictEqual(harness.getFetchedIssues(), []);
+
+    // 3. Converted to draft via GraphQL.
     assert.strictEqual(harness.getGraphqlCalls().length, 1);
     assert.ok(harness.getGraphqlCalls()[0].query.includes('convertPullRequestToDraft'));
     assert.deepStrictEqual(harness.getGraphqlCalls()[0].variables, { id: 'PR_42' });
 
-    // 3. Sticky comment created.
+    // 4. Sticky comment created.
     assert.strictEqual(harness.getCreatedComments().length, 1);
     assert.ok(harness.getCreatedComments()[0].body.startsWith('<!-- pr-approved-issue-check -->'));
     assert.ok(harness.getCreatedComments()[0].body.includes('No issue reference was found in the description.'));
 
-    // 4. Workflow marked failed.
+    // 5. Workflow marked failed.
     assert.strictEqual(
       harness.getFailedMessage(),
       'No approved issue assigned to external-dev is linked in #42.'
     );
   });
 
-  it('on opened when section already exists and PR is already draft: skips body update and draft conversion', async () => {
+  it('on opened with an approved issue already linked: keeps non-draft PR ready for review without converting to draft', async () => {
     const harness = createHarness({
       action: 'opened',
       pr: {
-        number: 43,
-        node_id: 'PR_43',
-        draft: true,
+        number: 44,
+        node_id: 'PR_44',
+        draft: false,
         author_association: 'NONE',
         user: { login: 'external-dev', type: 'User' },
-        body: '## Approved issue link\n\nStill working on it.',
+        body: '## Approved issue link\nFixes #500',
+      },
+      issuesByNumber: {
+        500: { number: 500, assignees: [{ login: 'external-dev' }] },
       },
     });
 
     await harness.run();
 
-    assert.strictEqual(harness.getUpdatedPrs().length, 0);
+    // Never converts to draft or mutates draft state when already passing!
     assert.strictEqual(harness.getGraphqlCalls().length, 0);
-    assert.notStrictEqual(harness.getFailedMessage(), null);
+    assert.strictEqual(harness.getFailedMessage(), null);
+    assert.ok(harness.getCreatedComments()[0].body.includes('This PR is **Ready for review**.'));
   });
 
-  it('passes check and marks draft PR ready for review when an issue assigned to the author is referenced', async () => {
+  it('passes check on draft PR without automatically converting it out of draft', async () => {
     const harness = createHarness({
       action: 'edited',
       pr: {
@@ -208,22 +225,23 @@ describe('prApprovedIssue', () => {
 
     await harness.run();
 
-    // Marked ready for review via GraphQL.
-    assert.strictEqual(harness.getGraphqlCalls().length, 1);
-    assert.ok(harness.getGraphqlCalls()[0].query.includes('markPullRequestReadyForReview'));
+    // Must NOT call markPullRequestReadyForReview — draft PRs stay draft until the author marks them ready.
+    assert.strictEqual(harness.getGraphqlCalls().length, 0);
 
-    // Sticky comment reports passed issues #125, #123 (matched in pattern order: URL, owner/repo#, bare #).
+    // Sticky comment reports passed issues #125, #123 and tells author they can mark it ready when ready.
     assert.strictEqual(harness.getCreatedComments().length, 1);
     const commentBody = harness.getCreatedComments()[0].body;
     assert.ok(commentBody.includes('✅ Approved issue check passed: #125, #123 is assigned to @External-Dev.'));
-    assert.ok(commentBody.includes('This PR is **Ready for review**.'));
+    assert.ok(commentBody.includes('You can mark this PR **Ready for review** when it is ready.'));
 
     // Check succeeded.
     assert.strictEqual(harness.getFailedMessage(), null);
   });
 
-  it('ignores references to other repositories and pull request numbers', async () => {
+  it('ignores issue references inside HTML comments and the RFC policy issue #23601', async () => {
     const harness = createHarness({
+      owner: 'keras-team',
+      repo: 'keras',
       action: 'edited',
       pr: {
         number: 50,
@@ -231,9 +249,15 @@ describe('prApprovedIssue', () => {
         draft: true,
         author_association: 'NONE',
         user: { login: 'contributor', type: 'User' },
-        body: 'Fixes other-org/other-repo#100 and https://github.com/other-org/other-repo/issues/101 and #200',
+        body: [
+          '<!--- Link the approved issue, e.g. "Fixes #123" or https://github.com/keras-team/keras/issues/23601 -->',
+          'Please review our [PR Contribution Policy](https://github.com/keras-team/keras/issues/23601).',
+          'Fixes other-org/other-repo#100 and https://github.com/other-org/other-repo/issues/101 and #200',
+        ].join('\n'),
       },
       issuesByNumber: {
+        123: { number: 123, assignees: [{ login: 'contributor' }] },
+        23601: { number: 23601, assignees: [{ login: 'contributor' }] },
         100: { number: 100, assignees: [{ login: 'contributor' }] },
         101: { number: 101, assignees: [{ login: 'contributor' }] },
         // #200 is a PR, not an issue.
@@ -243,6 +267,8 @@ describe('prApprovedIssue', () => {
 
     await harness.run();
 
+    // Only #200 was fetched (neither #123 in HTML comment nor #23601 RFC policy issue was fetched).
+    assert.deepStrictEqual(harness.getFetchedIssues(), [200]);
     assert.strictEqual(harness.getGraphqlCalls().length, 0);
     assert.notStrictEqual(harness.getFailedMessage(), null);
     assert.ok(
@@ -330,19 +356,16 @@ describe('prApprovedIssue', () => {
     assert.ok(changedHarness.getUpdatedComments()[0].body.includes('#456'));
   });
 
-  it('logs warning with permissions hint when GraphQL draft state toggle fails', async () => {
+  it('logs warning with permissions hint when GraphQL convertToDraft fails', async () => {
     const harness = createHarness({
-      action: 'edited',
+      action: 'ready_for_review',
       pr: {
         number: 70,
         node_id: 'PR_70',
-        draft: true,
+        draft: false,
         author_association: 'NONE',
         user: { login: 'contributor', type: 'User' },
-        body: 'Fixes #123',
-      },
-      issuesByNumber: {
-        123: { number: 123, assignees: [{ login: 'contributor' }] },
+        body: 'No issue linked yet',
       },
       graphqlError: new Error('Resource not accessible by integration'),
     });
@@ -358,7 +381,7 @@ describe('prApprovedIssue', () => {
     assert.ok(
       harness
         .getCreatedComments()[0]
-        .body.includes('Could not mark this PR as ready automatically; please mark it **Ready for review**.')
+        .body.includes('This PR must stay in **draft**')
     );
   });
 });
