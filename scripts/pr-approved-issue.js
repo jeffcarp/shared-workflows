@@ -38,14 +38,22 @@ const IGNORED_REPO_ISSUES = {
 };
 
 module.exports = async function prApprovedIssue({ github, context, core }) {
-  const pr = context.payload.pull_request;
-  if (!pr) {
+  const payloadPr = context.payload.pull_request;
+  if (!payloadPr) {
     core.info("Not a pull request payload.");
     return;
   }
 
   const { owner, repo } = context.repo;
   const action = context.payload.action;
+
+  // Fetch live PR state so re-running a failed workflow job reads the latest
+  // PR description and draft status rather than the frozen event payload.
+  const { data: pr } = await github.rest.pulls.get({
+    owner,
+    repo,
+    pull_number: payloadPr.number,
+  });
   const author = pr.user.login;
 
   // Defence in depth: the workflow `if:` already filters these out.

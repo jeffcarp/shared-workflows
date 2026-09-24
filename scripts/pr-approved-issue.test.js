@@ -26,6 +26,7 @@ describe('prApprovedIssue', () => {
     repo = 'keras-hub',
     action = 'opened',
     pr = null,
+    payloadPr = undefined,
     issuesByNumber = {},
     graphqlError = null,
   }) {
@@ -46,6 +47,9 @@ describe('prApprovedIssue', () => {
 
     const github = {
       rest: {
+        pulls: {
+          get: async () => ({ data: pr }),
+        },
         issues: {
           get: async ({ issue_number }) => {
             fetchedIssues.push(issue_number);
@@ -72,7 +76,7 @@ describe('prApprovedIssue', () => {
       repo: { owner, repo },
       payload: {
         action,
-        pull_request: pr,
+        pull_request: payloadPr !== undefined ? payloadPr : (pr ? { number: pr.number } : null),
       },
     };
 
@@ -117,6 +121,39 @@ describe('prApprovedIssue', () => {
       assert.strictEqual(harness.getGraphqlCalls().length, 0);
       assert.strictEqual(harness.getCreatedComments().length, 0);
     }
+  });
+
+  it('fetches live PR state via pulls.get instead of relying on frozen event payload when re-run', async () => {
+    const harness = createHarness({
+      action: 'opened',
+      // Stale frozen webhook payload from when the PR was first opened without an issue link:
+      payloadPr: {
+        number: 42,
+        node_id: 'PR_42',
+        draft: false,
+        author_association: 'NONE',
+        user: { login: 'external-dev', type: 'User' },
+        body: 'Initial body without issue link',
+      },
+      // Live PR state on GitHub after the author updated the description:
+      pr: {
+        number: 42,
+        node_id: 'PR_42',
+        draft: true,
+        author_association: 'NONE',
+        user: { login: 'external-dev', type: 'User' },
+        body: 'Fixes #123',
+      },
+      issuesByNumber: {
+        123: { number: 123, assignees: [{ login: 'external-dev' }] },
+      },
+    });
+
+    await harness.run();
+
+    assert.strictEqual(harness.getFailedMessage(), null);
+    assert.strictEqual(harness.getGraphqlCalls().length, 0);
+    assert.strictEqual(harness.getCreatedComments().length, 0);
   });
 
   it('on opened without linked issue: converts non-draft PR to draft, posts comment, and fails', async () => {
