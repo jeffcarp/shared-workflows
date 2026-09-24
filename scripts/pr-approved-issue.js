@@ -73,14 +73,7 @@ module.exports = async function prApprovedIssue({ github, context, core }) {
   let body = pr.body || "";
   let isDraft = pr.draft;
 
-  // 1. On open: ensure the description has the "Approved issue link" section.
-  if (action === "opened" && !body.includes(SECTION_HEADING)) {
-    body = SECTION_TEMPLATE + body;
-    await github.rest.pulls.update({ owner, repo, pull_number: pr.number, body });
-    core.info(`Added "${SECTION_HEADING}" section to #${pr.number}.`);
-  }
-
-  // 2. Find issues referenced in the description that are assigned to the author.
+  // 1. Find issues referenced in the description that are assigned to the author.
   const referenced = findIssueNumbers(body, owner, repo);
   const assigned = [];
   const notAssigned = [];
@@ -95,6 +88,13 @@ module.exports = async function prApprovedIssue({ github, context, core }) {
     }
   }
   const passed = assigned.length > 0;
+
+  // 2. On open: if the check failed, ensure the description has the "Approved issue link" section.
+  if (!passed && action === "opened" && !body.includes(SECTION_HEADING)) {
+    body = SECTION_TEMPLATE + body;
+    await github.rest.pulls.update({ owner, repo, pull_number: pr.number, body });
+    core.info(`Added "${SECTION_HEADING}" section to #${pr.number}.`);
+  }
 
   // 3. Convert to draft if the check failed and the PR is not already a draft.
   // Never automatically mark a draft PR as ready for review.

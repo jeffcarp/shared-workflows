@@ -181,7 +181,7 @@ describe('prApprovedIssue', () => {
     );
   });
 
-  it('on opened with an approved issue already linked: keeps non-draft PR ready for review without converting to draft', async () => {
+  it('on opened with an approved issue already linked: keeps non-draft PR ready for review without mutating body or draft state', async () => {
     const harness = createHarness({
       action: 'opened',
       pr: {
@@ -190,7 +190,7 @@ describe('prApprovedIssue', () => {
         draft: false,
         author_association: 'NONE',
         user: { login: 'external-dev', type: 'User' },
-        body: '## Approved issue link\nFixes #500',
+        body: '## Description\nFixes #500',
       },
       issuesByNumber: {
         500: { number: 500, assignees: [{ login: 'external-dev' }] },
@@ -199,7 +199,8 @@ describe('prApprovedIssue', () => {
 
     await harness.run();
 
-    // Never converts to draft or mutates draft state when already passing!
+    // Never mutates body or converts to draft when already passing on open.
+    assert.strictEqual(harness.getUpdatedPrs().length, 0);
     assert.strictEqual(harness.getGraphqlCalls().length, 0);
     assert.strictEqual(harness.getFailedMessage(), null);
     assert.ok(harness.getCreatedComments()[0].body.includes('This PR is **Ready for review**.'));
