@@ -2,6 +2,8 @@
 
 To keep review bandwidth focused on high-leverage improvements and prevent duplicate work, external pull requests across `keras-team` repositories require a **linked, approved issue assigned to the PR author**.
 
+> **NOTE:** We're constantly evolving this policy for optimal project velocity. If you have any feedback, please chime in on [keras#23601](https://github.com/keras-team/keras/issues/23601).
+
 ## Overview of Requirements
 
 1. **Open or find an issue first**:
