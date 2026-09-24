@@ -31,8 +31,8 @@ Our automated workflow checks every pull request from external contributors when
   - The workflow strips HTML comments (`<!-- ... -->`) from the PR description and scans for issue references belonging to the same repository (`#xxx`, `owner/repo#xxx`, or `https://github.com/owner/repo/issues/xxx`).
   - Pull request numbers are ignored — the linked number must be an **issue** in the repository, and your GitHub username must be in the issue's **Assignees** list.
 - **Draft state behavior**:
-  - **When the check fails**: If your PR does not link an issue assigned to you and is not currently a draft, the workflow automatically converts the PR to **Draft** and posts a status comment explaining how to resolve it.
-  - **When the check passes**: Once you link an issue assigned to you in the PR description, the status check passes (`✅`). If your PR was in **Draft**, it stays in draft until you click **Ready for review** yourself (the workflow will never prematurely mark a draft PR as ready for review).
+  - **When the check fails**: If your PR does not link an issue assigned to you and is not currently a draft, the workflow automatically converts the PR to **Draft**, posts a comment explaining how to resolve it, and fails the check.
+  - **When the check passes**: Once you link an issue assigned to you in the PR description, the status check passes (`✅`). If your PR was in **Draft**, it stays in draft until you click **Ready for review** yourself.
 
 ---
 

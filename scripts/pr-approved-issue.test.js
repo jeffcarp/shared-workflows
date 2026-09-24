@@ -27,17 +27,14 @@ describe('prApprovedIssue', () => {
     action = 'opened',
     pr = null,
     issuesByNumber = {},
-    existingComments = [],
     graphqlError = null,
   }) {
     const infoMessages = [];
     const warningMessages = [];
     let failedMessage = null;
-    const updatedPrs = [];
     const fetchedIssues = [];
     const graphqlCalls = [];
     const createdComments = [];
-    const updatedComments = [];
 
     const core = {
       info: (msg) => infoMessages.push(msg),
@@ -49,11 +46,6 @@ describe('prApprovedIssue', () => {
 
     const github = {
       rest: {
-        pulls: {
-          update: async (params) => {
-            updatedPrs.push(params);
-          },
-        },
         issues: {
           get: async ({ issue_number }) => {
             fetchedIssues.push(issue_number);
@@ -62,18 +54,10 @@ describe('prApprovedIssue', () => {
             }
             return { data: issuesByNumber[issue_number] };
           },
-          listComments: async () => ({ data: existingComments }),
           createComment: async (params) => {
             createdComments.push(params);
           },
-          updateComment: async (params) => {
-            updatedComments.push(params);
-          },
         },
-      },
-      paginate: async (fn, params) => {
-        const res = await fn(params);
-        return res.data;
       },
       graphql: async (query, variables) => {
         graphqlCalls.push({ query, variables });
@@ -97,11 +81,9 @@ describe('prApprovedIssue', () => {
       getInfoMessages: () => infoMessages,
       getWarningMessages: () => warningMessages,
       getFailedMessage: () => failedMessage,
-      getUpdatedPrs: () => updatedPrs,
       getFetchedIssues: () => fetchedIssues,
       getGraphqlCalls: () => graphqlCalls,
       getCreatedComments: () => createdComments,
-      getUpdatedComments: () => updatedComments,
     };
   }
 
@@ -137,7 +119,7 @@ describe('prApprovedIssue', () => {
     }
   });
 
-  it('on opened without linked issue: prepends section, converts non-draft PR to draft, posts comment, and fails', async () => {
+  it('on opened without linked issue: converts non-draft PR to draft, posts comment, and fails', async () => {
     const harness = createHarness({
       action: 'opened',
       pr: {
@@ -148,65 +130,27 @@ describe('prApprovedIssue', () => {
         user: { login: 'external-dev', type: 'User' },
         body: 'Here is my new feature.',
       },
-      issuesByNumber: {
-        // Even if #123 exists in the repo, the template comment must not trigger a fetch for #123.
-        123: { number: 123, assignees: [{ login: 'someone-else' }] },
-      },
     });
 
     await harness.run();
 
-    // 1. Section added to PR description.
-    assert.strictEqual(harness.getUpdatedPrs().length, 1);
-    assert.ok(harness.getUpdatedPrs()[0].body.startsWith('## Approved issue link\n'));
-    assert.ok(harness.getUpdatedPrs()[0].body.endsWith('Here is my new feature.'));
-
-    // 2. No issue numbers fetched from HTML comments.
-    assert.deepStrictEqual(harness.getFetchedIssues(), []);
-
-    // 3. Converted to draft via GraphQL.
+    // 1. Converted to draft via GraphQL.
     assert.strictEqual(harness.getGraphqlCalls().length, 1);
     assert.ok(harness.getGraphqlCalls()[0].query.includes('convertPullRequestToDraft'));
     assert.deepStrictEqual(harness.getGraphqlCalls()[0].variables, { id: 'PR_42' });
 
-    // 4. Sticky comment created.
+    // 2. Comment posted.
     assert.strictEqual(harness.getCreatedComments().length, 1);
-    assert.ok(harness.getCreatedComments()[0].body.startsWith('<!-- pr-approved-issue-check -->'));
     assert.ok(harness.getCreatedComments()[0].body.includes('No issue reference was found in the description.'));
 
-    // 5. Workflow marked failed.
+    // 3. Workflow marked failed.
     assert.strictEqual(
       harness.getFailedMessage(),
       'No approved issue assigned to external-dev is linked in #42.'
     );
   });
 
-  it('on opened with an approved issue already linked: keeps non-draft PR ready for review without mutating body or draft state', async () => {
-    const harness = createHarness({
-      action: 'opened',
-      pr: {
-        number: 44,
-        node_id: 'PR_44',
-        draft: false,
-        author_association: 'NONE',
-        user: { login: 'external-dev', type: 'User' },
-        body: '## Description\nFixes #500',
-      },
-      issuesByNumber: {
-        500: { number: 500, assignees: [{ login: 'external-dev' }] },
-      },
-    });
-
-    await harness.run();
-
-    // Never mutates body or converts to draft when already passing on open.
-    assert.strictEqual(harness.getUpdatedPrs().length, 0);
-    assert.strictEqual(harness.getGraphqlCalls().length, 0);
-    assert.strictEqual(harness.getFailedMessage(), null);
-    assert.ok(harness.getCreatedComments()[0].body.includes('This PR is **Ready for review**.'));
-  });
-
-  it('passes check on draft PR without automatically converting it out of draft', async () => {
+  it('passes check without posting a comment or mutating draft state when an assigned issue is linked', async () => {
     const harness = createHarness({
       action: 'edited',
       pr: {
@@ -226,24 +170,22 @@ describe('prApprovedIssue', () => {
 
     await harness.run();
 
-    // Must NOT call markPullRequestReadyForReview — draft PRs stay draft until the author marks them ready.
+    // No GraphQL draft toggle and no comment when passing.
     assert.strictEqual(harness.getGraphqlCalls().length, 0);
-
-    // Sticky comment reports passed issues #125, #123 and tells author they can mark it ready when ready.
-    assert.strictEqual(harness.getCreatedComments().length, 1);
-    const commentBody = harness.getCreatedComments()[0].body;
-    assert.ok(commentBody.includes('✅ Approved issue check passed: #125, #123 is assigned to @External-Dev.'));
-    assert.ok(commentBody.includes('You can mark this PR **Ready for review** when it is ready.'));
-
-    // Check succeeded.
+    assert.strictEqual(harness.getCreatedComments().length, 0);
     assert.strictEqual(harness.getFailedMessage(), null);
+    assert.ok(
+      harness
+        .getInfoMessages()
+        .includes('Approved issue check passed for #42: #125, #123 assigned to @External-Dev.')
+    );
   });
 
   it('ignores issue references inside HTML comments and the RFC policy issue #23601', async () => {
     const harness = createHarness({
       owner: 'keras-team',
       repo: 'keras',
-      action: 'edited',
+      action: 'opened',
       pr: {
         number: 50,
         node_id: 'PR_50',
@@ -277,7 +219,7 @@ describe('prApprovedIssue', () => {
     );
   });
 
-  it('converts non-draft PR to draft when edited to reference only unassigned issues', async () => {
+  it('converts non-draft PR to draft and posts comment when edited to reference only unassigned issues', async () => {
     const harness = createHarness({
       action: 'edited',
       pr: {
@@ -298,6 +240,7 @@ describe('prApprovedIssue', () => {
 
     assert.strictEqual(harness.getGraphqlCalls().length, 1);
     assert.ok(harness.getGraphqlCalls()[0].query.includes('convertPullRequestToDraft'));
+    assert.strictEqual(harness.getCreatedComments().length, 1);
     assert.ok(
       harness
         .getCreatedComments()[0]
@@ -306,55 +249,24 @@ describe('prApprovedIssue', () => {
     assert.notStrictEqual(harness.getFailedMessage(), null);
   });
 
-  it('updates existing sticky comment when content changes and avoids API call when unchanged', async () => {
-    const existingBody =
-      '<!-- pr-approved-issue-check -->\n' +
-      '✅ Approved issue check passed: #123 is assigned to @contributor.\n' +
-      'This PR is **Ready for review**.';
-
-    // 1. Unchanged comment body -> no create or update call.
-    const unchangedHarness = createHarness({
+  it('does not post duplicate comments when an already-draft PR is edited and still failing', async () => {
+    const harness = createHarness({
       action: 'edited',
       pr: {
         number: 60,
         node_id: 'PR_60',
-        draft: false,
+        draft: true,
         author_association: 'NONE',
         user: { login: 'contributor', type: 'User' },
-        body: 'Fixes #123',
+        body: 'Still working on description',
       },
-      issuesByNumber: {
-        123: { number: 123, assignees: [{ login: 'contributor' }] },
-      },
-      existingComments: [{ id: 777, body: existingBody }],
     });
 
-    await unchangedHarness.run();
-    assert.strictEqual(unchangedHarness.getCreatedComments().length, 0);
-    assert.strictEqual(unchangedHarness.getUpdatedComments().length, 0);
+    await harness.run();
 
-    // 2. Changed comment body -> updates existing comment.
-    const changedHarness = createHarness({
-      action: 'edited',
-      pr: {
-        number: 60,
-        node_id: 'PR_60',
-        draft: false,
-        author_association: 'NONE',
-        user: { login: 'contributor', type: 'User' },
-        body: 'Fixes #456',
-      },
-      issuesByNumber: {
-        456: { number: 456, assignees: [{ login: 'contributor' }] },
-      },
-      existingComments: [{ id: 777, body: existingBody }],
-    });
-
-    await changedHarness.run();
-    assert.strictEqual(changedHarness.getCreatedComments().length, 0);
-    assert.strictEqual(changedHarness.getUpdatedComments().length, 1);
-    assert.strictEqual(changedHarness.getUpdatedComments()[0].comment_id, 777);
-    assert.ok(changedHarness.getUpdatedComments()[0].body.includes('#456'));
+    assert.strictEqual(harness.getGraphqlCalls().length, 0);
+    assert.strictEqual(harness.getCreatedComments().length, 0);
+    assert.notStrictEqual(harness.getFailedMessage(), null);
   });
 
   it('logs warning with permissions hint when GraphQL convertToDraft fails', async () => {
@@ -379,10 +291,6 @@ describe('prApprovedIssue', () => {
         .getWarningMessages()[0]
         .includes('Toggling draft state needs `contents: write` and `pull-requests: write`.')
     );
-    assert.ok(
-      harness
-        .getCreatedComments()[0]
-        .body.includes('This PR must stay in **draft**')
-    );
+    assert.strictEqual(harness.getCreatedComments().length, 1);
   });
 });
